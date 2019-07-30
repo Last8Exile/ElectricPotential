@@ -1,0 +1,157 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+
+RWTexture3D<float> _Result;
+
+uniform float _InitialValue;
+uniform float _NodesCount;
+
+
+struct Figure
+{
+	int Type;
+	float4x4 Matr;
+	float4x4 Params;
+};
+
+StructuredBuffer<Figure> _Figures;
+uniform int _FiguresCount;
+
+
+
+// Sphere
+// s: radius
+float sdSphere( float3 p, float s )
+{
+	return length(p)-s;
+}
+
+float sdEllipsoid( float3 p, float3 r )
+{
+	return (length( p/r ) - 1.0) * min(min(r.x,r.y),r.z);
+}
+
+// Torus
+// t.x: diameter
+// t.y: thickness
+float sdTorus(float3 p, float2 t)
+{
+	float2 q = float2(length(p.xz) - t.x, p.y);
+	return length(q) - t.y;
+}
+
+// Box
+// b: half size of box in x/y/z
+float sdBox(float3 p, float3 b)
+{
+	float3 d = abs(p) - b;
+	return min(max(d.x, max(d.y, d.z)), 0.0) +
+		length(max(d, 0.0));
+}
+
+// CappedCylinder
+// h.x: radius
+// h.y: half height
+float sdCappedCylinder( float3 p, float2 h )
+{
+	float2 d = abs(float2(length(p.xz),p.y)) - h;
+	return min(max(d.x,d.y),0.0) + length(max(d,0.0));
+}
+
+float3 trans(float3 p, float4x4 matr)
+{
+	return mul(matr,float4(p,1)).xyz;
+}
+
+float sampleFigure(int number, float3 p, float4x4 params, float4x4 matr)
+{
+	float3 pos = trans(p,matr)/params[0].w;
+	if (number == 0)
+		return sdBox(pos, params[0].xyz)*params[0].w;
+	if (number == 1)
+		return sdEllipsoid(pos,params[0].xyz)*params[0].w;
+	if (number == 2)
+		return sdCappedCylinder(pos,params[0].xy)*params[0].w;
+	if (number == 3)
+		return sdTorus(pos,params[0].xy)*params[0].w;
+	return 0;
+}
+
+
+// Union
+float opU( float d1, float d2 )
+{
+	return min(d1,d2);
+}
+
+// Blend
+float opB( float d1, float d2, float k)
+{
+	float h = clamp( 0.5+0.5*(d2-d1)/k, 0.0, 1.0 );
+	return lerp( d2, d1, h ) - k*h*(1.0-h);
+}
+
+// Subtraction
+float opS( float d1, float d2 )
+{
+	return max(d1,-d2);
+}
+
+// Intersection
+float opI( float d1, float d2 )
+{
+	return max(d1,d2);
+}
+
+// Repetion
+float3 opRep( float3 p, float3 c )
+{
+	return fmod(p,c)-0.5*c;
+}
+
+
+float sampleOperation(int number, float op1, float op2, float4x4 params)
+{
+	if (number == -1)
+		return opU(op1,op2);
+	if (number == -2)
+		return opI(op1,op2);
+	if (number == -3)
+		return opS(op1,op2);
+	if (number == -4)
+		return opB(op1,op2, params[0].x);
+	return 0;
+}
+
+float map(float3 p) 
+{
+	float stack[32];
+	int pointer = 0;
+	for (int i=0; i<_FiguresCount; i++)
+	{
+		if (_Figures[i].Type < 0)
+		{
+			stack[pointer-2] = sampleOperation(_Figures[i].Type,stack[pointer-2],stack[pointer-1], _Figures[i].Params);
+			pointer--;
+		}
+		else
+		{
+			stack[pointer] = sampleFigure(_Figures[i].Type, p, _Figures[i].Params, _Figures[i].Matr);
+			pointer++;
+		}
+	}
+	return stack[0];
+}
+
+[numthreads(4,4,4)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+	float3 posWorld = id.xyz/_NodesCount;
+
+
+	if (map(posWorld) <= 0) 
+    {
+        _Result[id.xyz] = -_InitialValue;
+    }
+}

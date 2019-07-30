@@ -1,0 +1,229 @@
+﻿#pragma kernel CSMain
+
+Texture3D<float> _Source;
+RWTexture3D<float> _Result;
+
+
+uniform float _InitialValue;
+uniform float _NodesCount;
+uniform float _Dist;
+
+uniform int _MaxStep;
+
+
+struct Figure
+{
+	int Type;
+	float4x4 Matr;
+	float4x4 Params;
+};
+
+StructuredBuffer<Figure> _Figures;
+uniform int _FiguresCount;
+
+// Sphere
+// s: radius
+float sdSphere( float3 p, float s )
+{
+	return length(p)-s;
+}
+
+float sdEllipsoid( float3 p, float3 r )
+{
+	return (length( p/r ) - 1.0) * min(min(r.x,r.y),r.z);
+}
+
+// Torus
+// t.x: diameter
+// t.y: thickness
+float sdTorus(float3 p, float2 t)
+{
+	float2 q = float2(length(p.xz) - t.x, p.y);
+	return length(q) - t.y;
+}
+
+// Box
+// b: half size of box in x/y/z
+float sdBox(float3 p, float3 b)
+{
+	float3 d = abs(p) - b;
+	return min(max(d.x, max(d.y, d.z)), 0.0) +
+		length(max(d, 0.0));
+}
+
+// CappedCylinder
+// h.x: radius
+// h.y: half height
+float sdCappedCylinder( float3 p, float2 h )
+{
+	float2 d = abs(float2(length(p.xz),p.y)) - h;
+	return min(max(d.x,d.y),0.0) + length(max(d,0.0));
+}
+
+float3 trans(float3 p, float4x4 matr)
+{
+	return mul(matr,float4(p,1)).xyz;
+}
+
+float sampleFigure(int number, float3 p, float4x4 params, float4x4 matr)
+{
+	float3 pos = trans(p,matr)/params[0].w;
+	if (number == 0)
+		return sdBox(pos, params[0].xyz)*params[0].w;
+	if (number == 1)
+		return sdEllipsoid(pos,params[0].xyz)*params[0].w;
+	if (number == 2)
+		return sdCappedCylinder(pos,params[0].xy)*params[0].w;
+	if (number == 3)
+		return sdTorus(pos,params[0].xy)*params[0].w;
+	return 0;
+}
+
+
+// Union
+float opU( float d1, float d2 )
+{
+	return min(d1,d2);
+}
+
+// Blend
+float opB( float d1, float d2, float k)
+{
+	float h = clamp( 0.5+0.5*(d2-d1)/k, 0.0, 1.0 );
+	return lerp( d2, d1, h ) - k*h*(1.0-h);
+}
+
+// Subtraction
+float opS( float d1, float d2 )
+{
+	return max(d1,-d2);
+}
+
+// Intersection
+float opI( float d1, float d2 )
+{
+	return max(d1,d2);
+}
+
+// Repetion
+float3 opRep( float3 p, float3 c )
+{
+	return fmod(p,c)-0.5*c;
+}
+
+
+float sampleOperation(int number, float op1, float op2, float4x4 params)
+{
+	if (number == -1)
+		return opU(op1,op2);
+	if (number == -2)
+		return opI(op1,op2);
+	if (number == -3)
+		return opS(op1,op2);
+	if (number == -4)
+		return opB(op1,op2, params[0].x);
+	return 0;
+}
+
+float map(float3 p) 
+{
+	float stack[32];
+	int pointer = 0;
+	for (int i=0; i<_FiguresCount; i++)
+	{
+		if (_Figures[i].Type < 0)
+		{
+			stack[pointer-2] = sampleOperation(_Figures[i].Type,stack[pointer-2],stack[pointer-1], _Figures[i].Params);
+			pointer--;
+		}
+		else
+		{
+			stack[pointer] = sampleFigure(_Figures[i].Type, p, _Figures[i].Params, _Figures[i].Matr);
+			pointer++;
+		}
+	}
+	return stack[0];
+}
+
+float raymarch(float3 ro, float3 rd, float d) 
+{
+	float t = d;
+	float ret = _Dist;
+	for (int i = 0; i < _MaxStep; ++i) 
+	{
+		if (t > _Dist) 
+		{
+			break;
+		}
+
+		float3 p = ro + rd * t;
+		float d = map(p);
+
+		if (d < 0.0001) 
+		{
+			ret = t+d;
+			break;
+		}
+
+		t += d;
+	}
+	return ret;
+}
+
+[numthreads(4,4,4)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+	// Значение поля в текущей точке
+	float Ccenter = _Source[id.xyz];
+
+	//	Точки внутри границы
+	if (Ccenter < 0)
+	{
+		_Result[id.xyz] = Ccenter;
+		return;
+	}
+	
+	//	Текущая позиция
+	float3 posWorld = id.xyz/_NodesCount;
+
+	//	Расстояние до ближайшей границы
+	float dist = map(posWorld);
+
+	//	Если расстояние большое, то используюю обычную формулу
+	if (dist>_Dist)
+	{
+		float up =       abs(_Source[id.xyz + uint3( 0, 1, 0)]);
+		float down =     abs(_Source[id.xyz + uint3( 0,-1, 0)]);
+		float left =     abs(_Source[id.xyz + uint3( 1, 0, 0)]);
+		float right =    abs(_Source[id.xyz + uint3(-1, 0, 0)]);
+		float forward =  abs(_Source[id.xyz + uint3( 0, 0, 1)]);
+		float backward = abs(_Source[id.xyz + uint3( 0, 0,-1)]);
+		_Result[id.xyz] = (up + down + left + right + forward + backward) / 6;
+		return;
+	}
+
+	//	Расстояния от текущей точки до границ фигуры по направлению (не может быть больше шага по сетке)
+	float up =       raymarch(posWorld, float3(  0,  1,  0), dist);
+	float down =     raymarch(posWorld, float3(  0, -1,  0), dist);
+	float left =     raymarch(posWorld, float3(  1,  0,  0), dist);
+	float right =    raymarch(posWorld, float3( -1,  0,  0), dist);
+	float forward =  raymarch(posWorld, float3(  0,  0,  1), dist);
+	float backward = raymarch(posWorld, float3(  0,  0, -1), dist);
+
+	//	Значения поля в соседних точках (если по направлению граница ближе, чем шаг по сетке, то берётся значение на границе)
+	float Cup =       (up==_Dist)		? abs(_Source[id.xyz + uint3( 0, 1, 0)]) : _InitialValue;
+	float Cdown =     (down==_Dist)		? abs(_Source[id.xyz + uint3( 0,-1, 0)]) : _InitialValue;
+	float Cleft =     (left==_Dist)		? abs(_Source[id.xyz + uint3( 1, 0, 0)]) : _InitialValue;
+	float Cright =    (right==_Dist)	? abs(_Source[id.xyz + uint3(-1, 0, 0)]) : _InitialValue;
+	float Cforward =  (forward==_Dist)  ? abs(_Source[id.xyz + uint3( 0, 0, 1)]) : _InitialValue;
+	float Cbackward = (backward==_Dist) ? abs(_Source[id.xyz + uint3( 0, 0,-1)]) : _InitialValue;
+
+	//	Промежуточные вычисления коэффицентов
+	float hUP_DOWN =			(left+right)	*(forward+backward)	*(left*right)	*(forward*backward);
+	float hLEFT_RIGHT =			(up+down)		*(forward+backward)	*(up*down)		*(forward*backward);
+	float hFORWARD_BACKWARD =	(left+right)	*(up+down)			*(left*right)	*(up*down);
+
+	_Result[id.xyz] =	( hUP_DOWN*(Cup*down+Cdown*up) + hLEFT_RIGHT*(Cleft*right+Cright*left) + hFORWARD_BACKWARD*(Cforward*backward+Cbackward*forward) ) /
+						( hUP_DOWN*(up+down)           + hLEFT_RIGHT*(left+right)              + hFORWARD_BACKWARD*(backward+forward)					 );
+
+}

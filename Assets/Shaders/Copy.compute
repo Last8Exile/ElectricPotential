@@ -1,0 +1,13 @@
+﻿#pragma kernel CSMain
+
+Texture3D<float> _Source;
+RWTexture3D<float> _Result;
+RWTexture3D<float> _ResultAbs;
+
+
+[numthreads(8,8,8)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+	_Result[id.xyz] = _Source[id.xyz];
+	_ResultAbs[id.xyz] = abs(_Source[id.xyz]);
+}

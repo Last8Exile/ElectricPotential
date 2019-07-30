@@ -1,0 +1,25 @@
+﻿#pragma kernel CSMain
+
+Texture3D<float> _Source;
+RWTexture3D<float> _Result;
+
+[numthreads(4,4,4)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+	if (_Source[id.xyz] < 0)
+	{
+		_Result[id.xyz] = _Source[id.xyz];
+		return;
+	}
+		
+
+	float up =       _Source[id.xyz + uint3( 0, 1, 0)];
+	float down =     _Source[id.xyz + uint3( 0,-1, 0)];
+	float left =     _Source[id.xyz + uint3( 1, 0, 0)];
+	float right =    _Source[id.xyz + uint3(-1, 0, 0)];
+	float forward =  _Source[id.xyz + uint3( 0, 0, 1)];
+	float backward = _Source[id.xyz + uint3( 0, 0,-1)];
+
+
+	_Result[id.xyz] = (abs(up) + abs(down) + abs(left) + abs(right) + abs(forward) + abs(backward)) / 6;
+}
